@@ -3,8 +3,13 @@
 ## Goal
 
 Replace the current low-level API that exposes GCC internals with a clean,
-user-friendly API that covers 100% of use cases while hiding implementation
-details like BADLEN, 20-element type arrays, and format_char_info structures.
+user-friendly API for adding custom specifiers to existing format types
+(printf, scanf, etc.), hiding implementation details like BADLEN, type arrays,
+and format_char_info structures.
+
+**Scope:** Adding specifiers to existing format types only. Creating entirely
+new format types is out of scope for this design (rare use case, can be added
+later if needed).
 
 ---
 
@@ -41,24 +46,18 @@ struct format_specifier_def {
 ### Core API Functions
 
 ```c
-/* Add a format specifier to an existing format type (e.g., "gnu_printf").
+/* Add a format specifier to an existing format type.
+
+   format_name: Name of existing format type, e.g.:
+     - "printf", "gnu_printf" - standard printf
+     - "scanf", "gnu_scanf"   - standard scanf
+     - "strftime"             - time formatting
+     - etc.
+
    Returns true on success, false on failure.
    The format_specifier_def is copied; caller retains ownership.  */
 extern bool register_format_specifier (const char *format_name,
                                        const struct format_specifier_def *spec);
-
-/* Create a new printf-like format type.
-   Returns the format type index on success, -1 on failure.
-   The new type starts with basic specifiers: %% and %n.  */
-extern int register_printf_like_format (const char *name);
-
-/* Create a new scanf-like format type.
-   Returns the format type index on success, -1 on failure.  */
-extern int register_scanf_like_format (const char *name);
-
-/* Look up a format type by name.
-   Returns the format type index, or -1 if not found.  */
-extern int get_format_type_by_name (const char *name);
 ```
 
 ---
@@ -100,13 +99,6 @@ register_formats (void *event_data, void *data)
     },
     .flags = "-+0 wp",  /* allow width and precision */
   });
-
-  /* Create entirely new format type */
-  register_printf_like_format ("my_custom");
-  register_format_specifier ("my_custom", &(struct format_specifier_def){
-    .chars = "X",
-    .types = { [FMT_LEN_none] = integer_type_node },
-  });
 }
 
 int
@@ -146,21 +138,7 @@ format_char_info:
    };
    ```
 
-3. **Register using internal machinery**
-
-### register_printf_like_format Implementation
-
-Creates a new format_kind_info with:
-- Standard printf length modifiers (h, hh, l, ll, z, t, j, L)
-- Standard printf flags (-, +, 0, space, #, ', w, p)
-- Basic specifiers: %% (literal percent)
-- Printf-style flag validation rules
-
-### register_scanf_like_format Implementation
-
-Similar but with:
-- Scanf semantics (pointer arguments, suppression with *)
-- Scanf-specific flags
+3. **Register using existing internal machinery**
 
 ---
 
@@ -174,7 +152,6 @@ Similar but with:
 | Terminator entries | Added automatically |
 | Deep copying | Handled in implementation |
 | `format_char_info` structure | Never exposed; built from format_specifier_def |
-| `format_kind_info` structure | Never exposed (for printf/scanf-like formats) |
 
 ## What Plugin Authors Still Use Directly
 
@@ -234,11 +211,20 @@ Similar but with:
    - Reject obviously wrong types (e.g., FUNCTION_TYPE for %d)
    - Recommendation: basic validation, warn on suspicious types
 
+5. **FMT_LEN_MAX in struct - ABI stability concern?**
+   - If GCC adds new length modifiers, FMT_LEN_MAX changes
+   - Plugins compiled against old headers have wrong struct size
+   - Options:
+     a. Accept it (plugins already tied to GCC versions)
+     b. Use pointer to array + count instead of fixed array
+     c. Use list of (length, type) pairs
+   - Recommendation: TBD
+
 ---
 
 ## Files to Modify
 
-- `gcc/c-family/c-format.h` - Add new API declarations
-- `gcc/c-family/c-format.cc` - Add implementation
+- `gcc/c-family/c-format.h` - Add `format_specifier_def` struct and `register_format_specifier()` declaration
+- `gcc/c-family/c-format.cc` - Add implementation that translates to internal structures
 - `gcc/testsuite/g++.dg/plugin/format_plugin.cc` - Simplify using new API
 - `gcc/doc/plugins.texi` - Document the API
