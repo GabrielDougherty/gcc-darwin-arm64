@@ -5254,6 +5254,216 @@ init_dynamic_diag_info (void)
     gcc_dump_printf_char_table;
 }
 
+/* Initialize dynamic_format_types if not already done.  */
+static void
+init_dynamic_format_types (void)
+{
+  if (!dynamic_format_types)
+    {
+      dynamic_format_types = XNEWVEC (format_kind_info, n_format_types);
+      memcpy (dynamic_format_types, format_types_orig,
+              n_format_types * sizeof (format_kind_info));
+      format_types = dynamic_format_types;
+    }
+}
+
+/* Register a new format type (like "printf", "scanf", etc.).
+   Returns the format type index on success, or -1 on failure.
+   The format_kind_info is copied, so the caller's memory can be freed.  */
+int
+register_format_type (const format_kind_info *new_type)
+{
+  if (!new_type || !new_type->name)
+    return -1;
+
+  /* Check if a format type with this name already exists.  */
+  for (int i = 0; i < n_format_types; i++)
+    if (strcmp (format_types[i].name, new_type->name) == 0)
+      {
+        error ("format type %qs already registered", new_type->name);
+        return -1;
+      }
+
+  init_dynamic_format_types ();
+
+  /* Resize the array to hold one more entry.  */
+  int new_index = n_format_types;
+  n_format_types++;
+  dynamic_format_types
+      = XRESIZEVEC (format_kind_info, dynamic_format_types, n_format_types);
+  format_types = dynamic_format_types;
+
+  /* Copy the new format type.  */
+  memcpy (&dynamic_format_types[new_index], new_type,
+          sizeof (format_kind_info));
+
+  /* Deep copy the name string.  */
+  dynamic_format_types[new_index].name = xstrdup (new_type->name);
+
+  /* Deep copy the conversion_specs array if present.  */
+  if (new_type->conversion_specs)
+    {
+      const format_char_info *fci;
+      unsigned int spec_count;
+      for (fci = new_type->conversion_specs, spec_count = 0; fci->format_chars;
+           fci++, spec_count++)
+        ;
+      spec_count++; /* Include NULL terminator.  */
+
+      format_char_info *new_specs = XNEWVEC (format_char_info, spec_count);
+      memcpy (new_specs, new_type->conversion_specs,
+              spec_count * sizeof (format_char_info));
+
+      /* Deep copy string fields within each format_char_info.  */
+      for (unsigned int i = 0; i < spec_count - 1; i++)
+        {
+          if (new_specs[i].format_chars)
+            new_specs[i].format_chars = xstrdup (new_specs[i].format_chars);
+          if (new_specs[i].flag_chars)
+            new_specs[i].flag_chars = xstrdup (new_specs[i].flag_chars);
+          if (new_specs[i].flags2)
+            new_specs[i].flags2 = xstrdup (new_specs[i].flags2);
+          /* Note: chain pointer is intentionally shared, not deep copied.
+             The chain typically points to static data or data managed
+             elsewhere.  */
+        }
+
+      dynamic_format_types[new_index].conversion_specs = new_specs;
+    }
+
+  /* Deep copy length_char_specs if present.  */
+  if (new_type->length_char_specs)
+    {
+      unsigned int len_count = 0;
+      const format_length_info *fli = new_type->length_char_specs;
+      while (fli->name)
+        {
+          len_count++;
+          fli++;
+        }
+      len_count++; /* Include NULL terminator.  */
+
+      format_length_info *new_lens = XNEWVEC (format_length_info, len_count);
+      memcpy (new_lens, new_type->length_char_specs,
+              len_count * sizeof (format_length_info));
+
+      /* Deep copy string fields within each format_length_info.  */
+      for (unsigned int i = 0; i < len_count - 1; i++)
+        {
+          if (new_lens[i].name)
+            new_lens[i].name = xstrdup (new_lens[i].name);
+          if (new_lens[i].double_name)
+            new_lens[i].double_name = xstrdup (new_lens[i].double_name);
+        }
+
+      dynamic_format_types[new_index].length_char_specs = new_lens;
+    }
+
+  return new_index;
+}
+
+/* Get a format type index by name, or -1 if not found.  */
+int
+get_format_type_by_name (const char *name)
+{
+  if (!name)
+    return -1;
+
+  for (int i = 0; i < n_format_types; i++)
+    if (strcmp (format_types[i].name, name) == 0)
+      return i;
+
+  return -1;
+}
+
+/* Add a new conversion specifier to an existing format type.
+   FORMAT_TYPE is the index returned by register_format_type or
+   get_format_type_by_name.  The format_char_info is copied.
+   Returns true on success.  */
+bool
+register_format_specifier (int format_type, const format_char_info *new_spec)
+{
+  if (format_type < 0 || format_type >= n_format_types)
+    {
+      error ("invalid format type index %d", format_type);
+      return false;
+    }
+
+  if (!new_spec || !new_spec->format_chars)
+    {
+      error ("invalid format specifier");
+      return false;
+    }
+
+  init_dynamic_format_types ();
+
+  format_kind_info *fki = &dynamic_format_types[format_type];
+
+  /* Check if any of the new format chars conflict with existing ones.  */
+  if (fki->conversion_specs)
+    {
+      for (const format_char_info *existing = fki->conversion_specs;
+           existing->format_chars; existing++)
+        {
+          for (const char *c = new_spec->format_chars; *c; c++)
+            if (strchr (existing->format_chars, *c))
+              {
+                error (
+                    "format specifier %qc already exists in format type %qs",
+                    *c, fki->name);
+                return false;
+              }
+        }
+    }
+
+  /* Count existing entries (including NULL terminator).  */
+  unsigned int old_count = 1;
+  if (fki->conversion_specs)
+    for (const format_char_info *fci = fki->conversion_specs;
+         fci->format_chars; fci++, old_count++)
+      ;
+
+  /* Allocate new array with space for one more entry.  */
+  unsigned int new_count = old_count + 1;
+  format_char_info *new_specs = XNEWVEC (format_char_info, new_count);
+
+  /* Copy existing entries (excluding old NULL terminator).  */
+  if (fki->conversion_specs && old_count > 1)
+    memcpy (new_specs, fki->conversion_specs,
+            (old_count - 1) * sizeof (format_char_info));
+
+  /* Add the new entry.  */
+  memcpy (&new_specs[old_count - 1], new_spec, sizeof (format_char_info));
+
+  /* Deep copy string fields in the newly added specifier.  */
+  if (new_specs[old_count - 1].format_chars)
+    new_specs[old_count - 1].format_chars
+        = xstrdup (new_specs[old_count - 1].format_chars);
+  if (new_specs[old_count - 1].flag_chars)
+    new_specs[old_count - 1].flag_chars
+        = xstrdup (new_specs[old_count - 1].flag_chars);
+  if (new_specs[old_count - 1].flags2)
+    new_specs[old_count - 1].flags2
+        = xstrdup (new_specs[old_count - 1].flags2);
+  /* Note: chain pointer is intentionally shared, not deep copied.  */
+
+  /* Add NULL terminator.  */
+  memset (&new_specs[new_count - 1], 0, sizeof (format_char_info));
+
+  /* Free the old array if it was dynamically allocated.  For format types
+     within format_types_orig, compare against the original static array.
+     For dynamically registered format types (beyond format_types_orig bounds),
+     the conversion_specs is always dynamically allocated.  */
+  if (format_type >= (int)ARRAY_SIZE (format_types_orig)
+      || fki->conversion_specs
+             != format_types_orig[format_type].conversion_specs)
+    XDELETEVEC (const_cast<format_char_info *> (fki->conversion_specs));
+
+  fki->conversion_specs = new_specs;
+
+  return true;
+}
+
 #ifdef TARGET_FORMAT_TYPES
 extern const format_kind_info TARGET_FORMAT_TYPES[];
 #endif

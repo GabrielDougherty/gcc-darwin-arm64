@@ -71,3 +71,7 @@ stamp-*
 /gmp*
 /isl*
 /gettext*
+
+# REMOVE ME
+build/
+reference/

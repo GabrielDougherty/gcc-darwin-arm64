@@ -393,4 +393,21 @@ struct target_ovr_attr
   const char *named_attr_dst;
 };
 
+/* Plugin API for registering custom format types and specifiers.  */
+
+/* Register a new format type (like "printf", "scanf", etc.).
+   Returns the format type index on success, or -1 on failure.
+   The format_kind_info is copied, so the caller's memory can be freed.  */
+extern int register_format_type(const format_kind_info *new_type);
+
+/* Get a format type index by name, or -1 if not found.  */
+extern int get_format_type_by_name(const char *name);
+
+/* Add a new conversion specifier to an existing format type.
+   FORMAT_TYPE is the index returned by register_format_type or
+   get_format_type_by_name.  The format_char_info is copied.
+   Returns true on success.  */
+extern bool register_format_specifier(int format_type,
+                                      const format_char_info *new_spec);
+
 #endif /* GCC_C_FORMAT_H */
