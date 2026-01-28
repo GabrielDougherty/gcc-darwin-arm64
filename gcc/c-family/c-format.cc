@@ -5464,6 +5464,67 @@ register_format_specifier (int format_type, const format_char_info *new_spec)
   return true;
 }
 
+/* Add a format specifier using the simplified API.
+   Translates format_specifier_def to format_char_info internally.  */
+bool
+register_format_specifier_simple (const char *format_name,
+				  const struct format_specifier_def *spec)
+{
+  if (!format_name || !spec || !spec->chars || !spec->chars[0])
+    {
+      error ("invalid arguments to register_format_specifier_simple");
+      return false;
+    }
+
+  int format_idx = get_format_type_by_name (format_name);
+  if (format_idx < 0)
+    {
+      error ("unknown format type %qs", format_name);
+      return false;
+    }
+
+  /* Allocate persistent storage for tree pointers.
+     format_type_detail.type is a tree*, so we need stable addresses.
+     This array persists for the lifetime of the compilation.  */
+  tree *type_storage = XNEWVEC (tree, FMT_LEN_MAX);
+  for (int i = 0; i < FMT_LEN_MAX; i++)
+    type_storage[i] = spec->types[i];
+
+  /* Build format_char_info from format_specifier_def.  */
+  format_char_info fci;
+  memset (&fci, 0, sizeof (fci));
+
+  fci.format_chars = spec->chars;
+  fci.pointer_count = spec->pointer_count;
+  fci.std = STD_EXT;
+
+  /* Translate tree types to format_type_detail array.
+     NULL entries in spec->types become BADLEN.  */
+  for (int i = 0; i < FMT_LEN_MAX; i++)
+    {
+      if (type_storage[i])
+	{
+	  fci.types[i].std = STD_EXT;
+	  fci.types[i].name = NULL;
+	  fci.types[i].type = &type_storage[i];
+	}
+      else
+	{
+	  /* BADLEN equivalent: { STD_C89, NULL, NULL }  */
+	  fci.types[i].std = STD_C89;
+	  fci.types[i].name = NULL;
+	  fci.types[i].type = NULL;
+	}
+    }
+
+  /* Set flags, defaulting to "-w" if not specified.  */
+  fci.flag_chars = spec->flags ? spec->flags : "-w";
+  fci.flags2 = "";
+  fci.chain = NULL;
+
+  return register_format_specifier (format_idx, &fci);
+}
+
 #ifdef TARGET_FORMAT_TYPES
 extern const format_kind_info TARGET_FORMAT_TYPES[];
 #endif

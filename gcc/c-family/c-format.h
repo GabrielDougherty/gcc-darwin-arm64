@@ -398,16 +398,90 @@ struct target_ovr_attr
 /* Register a new format type (like "printf", "scanf", etc.).
    Returns the format type index on success, or -1 on failure.
    The format_kind_info is copied, so the caller's memory can be freed.  */
-extern int register_format_type(const format_kind_info *new_type);
+extern int register_format_type (const format_kind_info *new_type);
 
 /* Get a format type index by name, or -1 if not found.  */
-extern int get_format_type_by_name(const char *name);
+extern int get_format_type_by_name (const char *name);
 
 /* Add a new conversion specifier to an existing format type.
    FORMAT_TYPE is the index returned by register_format_type or
    get_format_type_by_name.  The format_char_info is copied.
    Returns true on success.  */
-extern bool register_format_specifier(int format_type,
-                                      const format_char_info *new_spec);
+extern bool register_format_specifier (int format_type,
+				       const format_char_info *new_spec);
+
+
+/* Simplified plugin API for custom format specifiers.
+
+   This API hides the complexity of format_char_info and format_type_detail,
+   allowing plugins to register custom specifiers with minimal boilerplate.
+
+   Example usage:
+
+     struct format_specifier_def spec = {
+       .chars = "T",
+       .pointer_count = 0,
+       .types = { [FMT_LEN_none] = integer_type_node },
+       .flags = "-w",
+     };
+     register_format_specifier_simple ("gnu_printf", &spec);
+
+   This registers %T to accept an int argument.  For length modifier support:
+
+     struct format_specifier_def spec = {
+       .chars = "V",
+       .pointer_count = 0,
+       .types = {
+         [FMT_LEN_none] = integer_type_node,
+         [FMT_LEN_l] = long_integer_type_node,
+         [FMT_LEN_ll] = long_long_integer_type_node,
+       },
+       .flags = "-+0 wp",
+     };
+
+   Note: These functions must be called during the PLUGIN_ATTRIBUTES callback.
+   The format_specifier_def is copied; caller retains ownership.  */
+
+/* User-facing specifier definition.
+   All fields have sensible defaults when zero-initialized.  */
+struct format_specifier_def
+{
+  /* Specifier character(s), e.g. "T" or "pS".  Required.  */
+  const char *chars;
+
+  /* Pointer indirection level:
+     0 = value (e.g., %d takes int)
+     1 = pointer (e.g., %s takes char*)
+     2 = pointer-to-pointer (rare)  */
+  int pointer_count;
+
+  /* Type accepted for each length modifier.
+     Use FMT_LEN_* constants as array indices.
+     Example: { [FMT_LEN_none] = integer_type_node,
+                [FMT_LEN_l] = long_integer_type_node }
+     NULL entries mean that length modifier is not allowed.  */
+  tree types[FMT_LEN_MAX];
+
+  /* Allowed flags as a string, e.g. "-+0 #".
+     'w' = width allowed, 'p' = precision allowed.
+     NULL = default flags "-w" (left-align and width).  */
+  const char *flags;
+};
+
+/* Add a format specifier to an existing format type using simplified API.
+
+   FORMAT_NAME: Name of existing format type, e.g.:
+     - "printf", "gnu_printf" - standard printf
+     - "scanf", "gnu_scanf"   - standard scanf
+     - "strftime"             - time formatting
+
+   SPEC: The specifier definition.  The structure is copied internally.
+
+   Returns true on success, false on failure (e.g., format not found,
+   duplicate specifier, or invalid chars).
+
+   Internally translates format_specifier_def to format_char_info.  */
+extern bool register_format_specifier_simple (const char *format_name,
+					      const struct format_specifier_def *spec);
 
 #endif /* GCC_C_FORMAT_H */

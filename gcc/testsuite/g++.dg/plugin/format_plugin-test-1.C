@@ -6,10 +6,6 @@
 extern "C" int printf (const char *, ...)
     __attribute__ ((format (printf, 1, 2)));
 
-/* Declare a function using our custom_printf format.  */
-extern "C" int custom_print (const char *, ...)
-    __attribute__ ((format (custom_printf, 1, 2)));
-
 struct quad
 {
   int x, y, z, w;
@@ -38,20 +34,27 @@ test_printf_Q (struct quad *q, int i)
 }
 
 void
-test_custom_printf (int ival, long val, long long llval, const char *s)
+test_printf_V (int ival, long lval, long long llval, const char *s)
 {
-  /* Test %V in custom_printf format.  */
-  custom_print ("%V\n", ival);    /* No warning - %V accepts int.  */
-  custom_print ("%lV\n", val);    /* No warning - %lV accepts long.  */
-  custom_print ("%llV\n", llval); /* No warning - %llV accepts long long.  */
-  custom_print ("%s\n", s);       /* No warning expected.  */
-  custom_print ("%%\n");          /* No warning expected.  */
+  /* Test %V with length modifiers added to printf.  */
+  printf ("%V\n", ival);    /* No warning - %V accepts int.  */
+  printf ("%lV\n", lval);   /* No warning - %lV accepts long.  */
+  printf ("%llV\n", llval); /* No warning - %llV accepts long long.  */
 
-  /* These should warn.  */
-  custom_print ("%V\n",
-                val); /* { dg-warning "format '%V' expects argument of type
-                         'int', but argument 2 has type 'long int'" } */
-  custom_print ("%d\n",
-                42); /* { dg-warning "unknown conversion type character" } */
-  custom_print ("%lV\n"); /* { dg-warning "too few arguments" } */
+  /* These should warn about type mismatches.  */
+  printf ("%V\n",
+          lval); /* { dg-warning "format '%V' expects argument of type 'int', but argument 2 has type 'long int'" } */
+  printf ("%lV\n",
+          ival); /* { dg-warning "format '%lV' expects argument of type 'long int', but argument 2 has type 'int'" } */
+  printf ("%llV\n",
+          lval); /* { dg-warning "format '%llV' expects argument of type 'long long int', but argument 2 has type 'long int'" } */
+
+  /* Test invalid length modifier for %V.  */
+  printf ("%hV\n", ival); /* { dg-warning "length" } */
+
+  /* Test flags and width/precision.  */
+  printf ("%+10V\n", ival);   /* No warning - + and width allowed.  */
+  printf ("%010V\n", ival);   /* No warning - 0 and width allowed.  */
+  printf ("%-10V\n", ival);   /* No warning - - and width allowed.  */
+  printf ("%10.5V\n", ival);  /* No warning - width and precision allowed.  */
 }

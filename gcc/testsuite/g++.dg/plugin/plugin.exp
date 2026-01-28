@@ -79,7 +79,7 @@ set plugin_test_list [list \
     	  show-template-tree-color-labels.C \
     	  show-template-tree-color-no-elide-type.C } \
     { comment_plugin.cc comments-1.C } \
-    { format_plugin.cc format_plugin-test-1.C format_plugin-test-2.C } \
+    { format_plugin.cc format_plugin-test-1.C format_plugin-test-2.C format_plugin-test-3.C } \
 ]
 
 foreach plugin_test $plugin_test_list {

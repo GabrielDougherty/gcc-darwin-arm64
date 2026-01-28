@@ -2,18 +2,80 @@
 
 ## Goal
 
-Replace the current low-level API that exposes GCC internals with a clean,
-user-friendly API for adding custom specifiers to existing format types
-(printf, scanf, etc.), hiding implementation details like BADLEN, type arrays,
-and format_char_info structures.
+Provide an attribute-based interface for adding custom format specifiers to
+existing format types (printf, scanf, etc.). This is implemented as a GCC
+plugin for faster development and testing, following Manuel López-Ibáñez's
+suggestion from the bug discussion.
+
+The attribute-based approach allows users to declare custom specifiers
+directly in their source code, without writing plugin code themselves.
 
 **Scope:** Adding specifiers to existing format types only. Creating entirely
-new format types is out of scope for this design (rare use case, can be added
-later if needed).
+new format types is out of scope for this design.
 
 ---
 
-## Proposed API (c-format.h)
+## User-Facing Attribute Syntax
+
+Users declare custom format specifiers via an attribute in their source code:
+
+```c
+/* Declare that %T in printf format strings accepts an int (for bool) */
+__attribute__((format_specifier(printf, "T", int)))
+
+/* Declare that %Q accepts a void* */
+__attribute__((format_specifier(printf, "Q", void *)))
+
+/* With length modifier support: %V=int, %lV=long, %llV=long long */
+__attribute__((format_specifier(printf, "V", int, long, long long)))
+```
+
+The attribute can be attached to:
+- A function declaration (applies to that translation unit)
+- A type declaration
+- Or used standalone with a dummy declaration
+
+### Attribute Parameters
+
+```
+format_specifier(format_type, specifier_char, type [, long_type [, long_long_type]])
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `format_type` | `printf`, `scanf`, `strftime`, etc. |
+| `specifier_char` | Single character like `"T"`, `"Q"`, `"V"` |
+| `type` | The C type accepted by bare `%T` |
+| `long_type` | (optional) Type for `%lT` |
+| `long_long_type` | (optional) Type for `%llT` |
+
+### Example Usage
+
+```c
+/* In a header file included before using custom specifiers */
+__attribute__((format_specifier(printf, "T", int)))
+__attribute__((format_specifier(printf, "Q", void *)))
+extern int my_printf(const char *, ...) __attribute__((format(printf, 1, 2)));
+
+/* Now these are checked correctly */
+void test(void) {
+    my_printf("%T %Q\n", 1, ptr);     /* OK */
+    my_printf("%T\n", "wrong");        /* warning: %T expects int */
+}
+```
+
+---
+
+## Plugin Implementation
+
+The plugin:
+1. Registers a handler for the `format_specifier` attribute
+2. When the attribute is encountered, calls the internal API to register the specifier
+3. Uses existing GCC format checking infrastructure
+
+---
+
+## Internal API (c-format.h)
 
 ### Specifier Definition Structure
 
@@ -224,7 +286,53 @@ format_char_info:
 
 ## Files to Modify
 
+### Core API (in GCC)
 - `gcc/c-family/c-format.h` - Add `format_specifier_def` struct and `register_format_specifier()` declaration
 - `gcc/c-family/c-format.cc` - Add implementation that translates to internal structures
-- `gcc/testsuite/g++.dg/plugin/format_plugin.cc` - Simplify using new API
-- `gcc/doc/plugins.texi` - Document the API
+
+### Plugin (separate, for faster iteration)
+- `format_specifier_plugin.cc` - The plugin that:
+  - Registers the `format_specifier` attribute handler
+  - Parses attribute arguments (format_type, specifier, types...)
+  - Calls `register_format_specifier()` with appropriate parameters
+
+### Testing
+- `gcc/testsuite/g++.dg/plugin/format_specifier_plugin.cc` - Plugin source
+- `gcc/testsuite/g++.dg/plugin/format_specifier-test-1.C` - Test cases
+
+### Documentation
+- `gcc/doc/plugins.texi` - Document the internal API
+- Plugin README - Document the attribute syntax for end users
+
+---
+
+## Development Approach
+
+Following Manuel's suggestion:
+
+1. **Start with plugin** - Faster iteration, no GCC rebuild for each change
+2. **Simple attribute design** - Not a pragma, easier to parse and use
+3. **Test with real specifiers** - Could test against GCC's own %E, %T, %q formats
+4. **Verify -Wmissing-format-attribute** - Ensure custom specifiers work with this warning
+5. **Submit for feedback** - Get community input before proposing for mainline
+6. **Later: consider mainline** - If successful, the attribute could become a GCC built-in
+
+---
+
+## Prior Art
+
+**Plan 9** (comment #31 in bug discussion):
+```c
+#pragma varargck type "C" TYPE   /* specifier 'C' consumes 1 arg of TYPE */
+#pragma varargck flag 'C'        /* modifier 'C' consumes 0 args */
+```
+Similar to our attribute design, validates the approach.
+
+---
+
+## Out of Scope (Future Work)
+
+- **Sub-specifiers** like `%pS` (kernel-style extensions)
+- **Creating new format types** (rare use case)
+- **Multi-argument specifiers** like `%.*s`
+- **sprintf optimization pass integration** (mentioned by Martin Sebor)
