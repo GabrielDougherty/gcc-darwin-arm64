@@ -6,12 +6,17 @@
       Called during PLUGIN_ATTRIBUTES to register %T, %Q, %V specifiers.
 
    2. Attribute-based API (__attribute__((format_specifier(...)))):
-      Users can declare custom specifiers in their source code:
+      Users can declare custom specifiers in their source code.
+      The expected argument types are extracted from the function parameters:
 
-        __attribute__((format_specifier(printf, "B", "int")))
-        void dummy_for_B(void);
+        __attribute__((format_specifier(printf, "M")))
+        int my_arginfo(MyStruct *);  // %M expects MyStruct*
 
-      This registers %B to accept an int argument.
+        __attribute__((format_specifier(printf, "W")))
+        int width_arginfo(int, long, long long);  // %W, %lW, %llW
+
+   This mirrors glibc's register_printf_specifier pattern where an arginfo
+   function describes the expected argument types.
 
    Usage:
      gcc -fplugin=./format_plugin.so -Wformat test.c
@@ -35,82 +40,25 @@
 
 int plugin_is_GPL_compatible;
 
-/* Map a type name string to a tree type node.
-   Returns NULL_TREE if the type name is not recognized.  */
-
-static tree
-lookup_type_by_name (const char *name)
-{
-  if (!name)
-    return NULL_TREE;
-
-  /* Basic integer types.  */
-  if (strcmp (name, "int") == 0)
-    return integer_type_node;
-  if (strcmp (name, "unsigned int") == 0 || strcmp (name, "unsigned") == 0)
-    return unsigned_type_node;
-  if (strcmp (name, "long") == 0 || strcmp (name, "long int") == 0)
-    return long_integer_type_node;
-  if (strcmp (name, "unsigned long") == 0
-      || strcmp (name, "unsigned long int") == 0)
-    return long_unsigned_type_node;
-  if (strcmp (name, "long long") == 0 || strcmp (name, "long long int") == 0)
-    return long_long_integer_type_node;
-  if (strcmp (name, "unsigned long long") == 0
-      || strcmp (name, "unsigned long long int") == 0)
-    return long_long_unsigned_type_node;
-  if (strcmp (name, "short") == 0 || strcmp (name, "short int") == 0)
-    return short_integer_type_node;
-  if (strcmp (name, "unsigned short") == 0
-      || strcmp (name, "unsigned short int") == 0)
-    return short_unsigned_type_node;
-
-  /* Character types.  */
-  if (strcmp (name, "char") == 0)
-    return char_type_node;
-  if (strcmp (name, "signed char") == 0)
-    return signed_char_type_node;
-  if (strcmp (name, "unsigned char") == 0)
-    return unsigned_char_type_node;
-
-  /* Floating point types.  */
-  if (strcmp (name, "float") == 0)
-    return float_type_node;
-  if (strcmp (name, "double") == 0)
-    return double_type_node;
-  if (strcmp (name, "long double") == 0)
-    return long_double_type_node;
-
-  /* Void type.  */
-  if (strcmp (name, "void") == 0)
-    return void_type_node;
-
-  /* Pointer types.  */
-  if (strcmp (name, "void*") == 0 || strcmp (name, "void *") == 0)
-    return ptr_type_node;  /* void* */
-  if (strcmp (name, "char*") == 0 || strcmp (name, "char *") == 0)
-    return build_pointer_type (char_type_node);
-  if (strcmp (name, "const char*") == 0 || strcmp (name, "const char *") == 0)
-    return build_pointer_type (build_qualified_type (char_type_node,
-						     TYPE_QUAL_CONST));
-
-  /* Size types.  */
-  if (strcmp (name, "size_t") == 0)
-    return size_type_node;
-  if (strcmp (name, "ptrdiff_t") == 0)
-    return ptrdiff_type_node;
-
-  return NULL_TREE;
-}
-
 /* Handle the format_specifier attribute.
 
-   Syntax: __attribute__((format_specifier(format_type, "char", "type"
-                                           [, "long_type" [, "long_long_type"]])))
+   Syntax: __attribute__((format_specifier(format_type, "specifier")))
+
+   The expected argument types are extracted from the function's parameter list.
+   This mirrors glibc's printf_arginfo_function pattern.
 
    Examples:
-     __attribute__((format_specifier(printf, "B", "int")))
-     __attribute__((format_specifier(printf, "W", "int", "long", "long long")))
+     // Simple specifier: %B expects int
+     __attribute__((format_specifier(printf, "B")))
+     int B_arginfo(int);
+
+     // Pointer type: %M expects MyStruct*
+     __attribute__((format_specifier(printf, "M")))
+     int M_arginfo(MyStruct *);
+
+     // With length modifiers: %W (int), %lW (long), %llW (long long)
+     __attribute__((format_specifier(printf, "W")))
+     int W_arginfo(int, long, long long);
 */
 
 static tree
@@ -120,22 +68,58 @@ handle_format_specifier_attribute (tree *node, tree name, tree args,
   /* We don't actually attach this attribute to the decl.  */
   *no_add_attrs = true;
 
-  /* Parse arguments: (format_type, "specifier_char", "type" [, ...]) */
+  /* The node should be a function declaration.  */
+  tree decl = *node;
+  if (TREE_CODE (decl) != FUNCTION_DECL)
+    {
+      error ("format_specifier attribute requires a function declaration");
+      return NULL_TREE;
+    }
+
+  /* Get the function type to extract parameter types.  */
+  tree fntype = TREE_TYPE (decl);
+  if (TREE_CODE (fntype) != FUNCTION_TYPE && TREE_CODE (fntype) != METHOD_TYPE)
+    {
+      error ("format_specifier attribute requires a function type");
+      return NULL_TREE;
+    }
+
+  /* Parse arguments: (format_type, "specifier_char") */
   if (!args)
     {
       error ("format_specifier attribute requires arguments");
       return NULL_TREE;
     }
 
-  /* First arg: format type identifier (printf, scanf, etc.) */
+  /* First arg: format type identifier (printf, scanf, etc.)
+     In C++, 'printf' might be looked up and resolved to the function decl,
+     so we need to handle both IDENTIFIER_NODE and ADDR_EXPR of FUNCTION_DECL.  */
   tree format_type_id = TREE_VALUE (args);
-  if (TREE_CODE (format_type_id) != IDENTIFIER_NODE)
+  const char *format_name = NULL;
+
+  if (TREE_CODE (format_type_id) == IDENTIFIER_NODE)
+    {
+      format_name = IDENTIFIER_POINTER (format_type_id);
+    }
+  else if (TREE_CODE (format_type_id) == ADDR_EXPR
+	   && TREE_CODE (TREE_OPERAND (format_type_id, 0)) == FUNCTION_DECL)
+    {
+      /* C++ looked up 'printf' and found the function - extract the name.  */
+      tree fn_decl = TREE_OPERAND (format_type_id, 0);
+      format_name = IDENTIFIER_POINTER (DECL_NAME (fn_decl));
+    }
+  else if (TREE_CODE (format_type_id) == FUNCTION_DECL)
+    {
+      /* C++ looked up 'printf' and resolved it directly to a function decl.  */
+      format_name = IDENTIFIER_POINTER (DECL_NAME (format_type_id));
+    }
+  else
     {
       error ("format_specifier: first argument must be a format type "
-	     "(e.g., printf, scanf)");
+	     "(e.g., printf, scanf), got tree code %s",
+	     get_tree_code_name (TREE_CODE (format_type_id)));
       return NULL_TREE;
     }
-  const char *format_name = IDENTIFIER_POINTER (format_type_id);
 
   /* Convert "printf" to "gnu_printf" for lookup.  */
   char full_format_name[64];
@@ -171,85 +155,58 @@ handle_format_specifier_attribute (tree *node, tree name, tree args,
       return NULL_TREE;
     }
 
-  args = TREE_CHAIN (args);
-  if (!args)
-    {
-      error ("format_specifier: missing type argument");
-      return NULL_TREE;
-    }
-
-  /* Build the format_specifier_def.  */
+  /* Build the format_specifier_def by extracting types from function params.  */
   struct format_specifier_def spec;
   memset (&spec, 0, sizeof (spec));
   spec.chars = spec_chars;
   spec.pointer_count = 0;
   spec.flags = NULL;  /* Use default flags.  */
 
-  /* Third arg: base type name (for no length modifier).  */
-  tree type_name_tree = TREE_VALUE (args);
-  if (TREE_CODE (type_name_tree) != STRING_CST)
+  /* Iterate over function parameter types.
+     Parameter 1 -> FMT_LEN_none (no length modifier)
+     Parameter 2 -> FMT_LEN_l ('l' length modifier)
+     Parameter 3 -> FMT_LEN_ll ('ll' length modifier)  */
+  tree arg_types = TYPE_ARG_TYPES (fntype);
+  int param_index = 0;
+
+  /* Map parameter index to format length modifier.  */
+  static const enum format_lengths len_map[] = {
+    FMT_LEN_none,  /* param 0: no modifier */
+    FMT_LEN_l,     /* param 1: 'l' modifier */
+    FMT_LEN_ll     /* param 2: 'll' modifier */
+  };
+
+  for (; arg_types && TREE_VALUE (arg_types) != void_type_node;
+       arg_types = TREE_CHAIN (arg_types), param_index++)
     {
-      error ("format_specifier: type argument must be a string "
-	     "(e.g., \"int\")");
+      if (param_index >= 3)
+	{
+	  warning (0, "format_specifier: ignoring parameters beyond the third");
+	  break;
+	}
+
+      tree param_type = TREE_VALUE (arg_types);
+
+      /* Handle pointer types specially.  */
+      if (POINTER_TYPE_P (param_type))
+	{
+	  /* For the first parameter, set pointer_count.  */
+	  if (param_index == 0)
+	    spec.pointer_count = 1;
+	  /* Store the pointed-to type.  */
+	  spec.types[len_map[param_index]] = TREE_TYPE (param_type);
+	}
+      else
+	{
+	  spec.types[len_map[param_index]] = param_type;
+	}
+    }
+
+  if (param_index == 0)
+    {
+      error ("format_specifier: function must have at least one parameter "
+	     "to specify the expected argument type");
       return NULL_TREE;
-    }
-  const char *type_name = TREE_STRING_POINTER (type_name_tree);
-  tree type_node = lookup_type_by_name (type_name);
-  if (!type_node)
-    {
-      error ("format_specifier: unknown type %qs", type_name);
-      return NULL_TREE;
-    }
-
-  /* Check if it's a pointer type.  */
-  if (POINTER_TYPE_P (type_node))
-    {
-      spec.pointer_count = 1;
-      spec.types[FMT_LEN_none] = TREE_TYPE (type_node);
-    }
-  else
-    {
-      spec.types[FMT_LEN_none] = type_node;
-    }
-
-  /* Optional fourth arg: type for 'l' length modifier.  */
-  args = TREE_CHAIN (args);
-  if (args)
-    {
-      type_name_tree = TREE_VALUE (args);
-      if (TREE_CODE (type_name_tree) != STRING_CST)
-	{
-	  error ("format_specifier: type argument must be a string");
-	  return NULL_TREE;
-	}
-      type_name = TREE_STRING_POINTER (type_name_tree);
-      type_node = lookup_type_by_name (type_name);
-      if (!type_node)
-	{
-	  error ("format_specifier: unknown type %qs", type_name);
-	  return NULL_TREE;
-	}
-      spec.types[FMT_LEN_l] = type_node;
-
-      /* Optional fifth arg: type for 'll' length modifier.  */
-      args = TREE_CHAIN (args);
-      if (args)
-	{
-	  type_name_tree = TREE_VALUE (args);
-	  if (TREE_CODE (type_name_tree) != STRING_CST)
-	    {
-	      error ("format_specifier: type argument must be a string");
-	      return NULL_TREE;
-	    }
-	  type_name = TREE_STRING_POINTER (type_name_tree);
-	  type_node = lookup_type_by_name (type_name);
-	  if (!type_node)
-	    {
-	      error ("format_specifier: unknown type %qs", type_name);
-	      return NULL_TREE;
-	    }
-	  spec.types[FMT_LEN_ll] = type_node;
-	}
     }
 
   /* Register the specifier.  */
@@ -269,9 +226,9 @@ handle_format_specifier_attribute (tree *node, tree name, tree args,
 /* Attribute specification for format_specifier.  */
 static struct attribute_spec format_specifier_attr = {
   "format_specifier",		/* name */
-  3,				/* min_length (format_type, char, type) */
-  5,				/* max_length (+ optional long_type, long_long_type) */
-  false,			/* decl_required */
+  2,				/* min_length (format_type, specifier_char) */
+  2,				/* max_length (types come from function params) */
+  true,				/* decl_required (must be on a function decl) */
   false,			/* type_required */
   false,			/* function_type_required */
   false,			/* affects_type_identity */
