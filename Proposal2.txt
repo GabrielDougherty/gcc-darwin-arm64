@@ -1,0 +1,8 @@
+Hi, I'm interested in working on this.
+
+PR c/47781 (reported in 2011) describes an issue where GCC emits unknown printf format specifier diagnostics for custom specifiers registered with glibc's register_printf_specifier. I'd like to work on a code change to fix this issue, but before that, in this RFC, I'm seeking input on whether my design is sensible enough to pursue.
+
+The basic issue described in PR c/47781 is that a project can register a custom printf format specifier (say "%M") with glibc using register_printf_specifier but there is no way to tell GCC's format checker about the new specifier. Such projects will get a diagnostic warning or error when compiled with -Wformat (or -Wall).
+
+
+My proposal is to add an attribute (via a plugin initially)
